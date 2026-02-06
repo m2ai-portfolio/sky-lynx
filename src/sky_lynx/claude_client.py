@@ -175,7 +175,11 @@ def build_analysis_prompt(metrics_summary: str, friction_details: list[str]) -> 
 def parse_recommendations(response_text: str) -> list[Recommendation]:
     """Parse recommendations from Claude's response.
 
-    This is a best-effort extraction - Claude's response format may vary.
+    Handles formats like:
+    - ### High Priority
+    - **R1: Title**
+    - - **Evidence**: ...
+    - - **Suggested Change**: ...
 
     Args:
         response_text: Raw response from Claude
@@ -183,27 +187,29 @@ def parse_recommendations(response_text: str) -> list[Recommendation]:
     Returns:
         List of parsed Recommendation objects
     """
-    recommendations = []
+    import re
 
-    # Look for recommendation sections
+    recommendations = []
     lines = response_text.split("\n")
-    current_rec = None
+    current_rec: Recommendation | None = None
+    current_priority = "medium"
     in_recommendations = False
 
     for line in lines:
-        lower_line = line.lower()
+        lower_line = line.lower().strip()
+        stripped = line.strip()
 
         # Detect start of recommendations section
-        if "recommendation" in lower_line and (
-            line.startswith("#") or line.startswith("**")
-        ):
+        if "## recommendation" in lower_line or "# recommendation" in lower_line:
             in_recommendations = True
             continue
 
         # Detect end of recommendations section
-        if in_recommendations and "working well" in lower_line:
+        if in_recommendations and (
+            "## what" in lower_line and "working" in lower_line
+        ):
             in_recommendations = False
-            if current_rec:
+            if current_rec and current_rec.title:
                 recommendations.append(current_rec)
                 current_rec = None
             continue
@@ -211,43 +217,57 @@ def parse_recommendations(response_text: str) -> list[Recommendation]:
         if not in_recommendations:
             continue
 
-        # Parse recommendation items
-        # Look for numbered items or bold titles
-        if (
-            line.strip().startswith(("1.", "2.", "3.", "4.", "5."))
-            or line.strip().startswith("**")
-        ) and ("consider" in lower_line or "add" in lower_line or "update" in lower_line):
+        # Detect priority headers like "### High Priority"
+        if stripped.startswith("###") and "priority" in lower_line:
+            if "high" in lower_line:
+                current_priority = "high"
+            elif "medium" in lower_line:
+                current_priority = "medium"
+            elif "low" in lower_line:
+                current_priority = "low"
+            continue
+
+        # Detect recommendation titles like "**R1: Title**" or "**Title**"
+        # Match patterns: **R1: Title**, **Title**, 1. **Title**
+        title_match = re.match(r'^(?:\d+\.\s*)?\*\*(?:R\d+:\s*)?(.+?)\*\*\s*$', stripped)
+        if title_match:
             # Save previous recommendation
             if current_rec and current_rec.title:
                 recommendations.append(current_rec)
 
-            # Start new recommendation
-            title = line.strip().lstrip("0123456789.").strip()
-            title = title.strip("*").strip()
+            title = title_match.group(1).strip()
             current_rec = Recommendation(
                 title=title,
-                priority="medium",
+                priority=current_priority,
                 evidence="",
                 suggested_change="",
                 impact="",
                 reversibility="high",
             )
+            continue
 
-        elif current_rec:
-            # Parse attributes
-            if "priority" in lower_line or "high" in lower_line and "impact" not in lower_line:
-                if "high" in lower_line:
-                    current_rec.priority = "high"
-                elif "low" in lower_line:
-                    current_rec.priority = "low"
+        # Parse attributes within a recommendation
+        if current_rec:
+            # Evidence line: - **Evidence**: ...
+            if "**evidence**" in lower_line:
+                match = re.search(r'\*\*Evidence\*\*:\s*(.+)', line, re.IGNORECASE)
+                if match:
+                    current_rec.evidence = match.group(1).strip()
 
-            if "evidence" in lower_line or "session" in lower_line:
-                current_rec.evidence = line.strip().lstrip("-*").strip()
+            # Suggested change: - **Suggested Change**: ...
+            elif "**suggested change**" in lower_line:
+                match = re.search(r'\*\*Suggested Change\*\*:\s*(.+)', line, re.IGNORECASE)
+                if match:
+                    current_rec.suggested_change = match.group(1).strip()
 
-            if "suggest" in lower_line or "change" in lower_line:
-                current_rec.suggested_change = line.strip().lstrip("-*").strip()
+            # Impact line: - **Impact**: ...
+            elif "**impact**" in lower_line:
+                match = re.search(r'\*\*Impact\*\*:\s*(.+)', line, re.IGNORECASE)
+                if match:
+                    current_rec.impact = match.group(1).strip()
 
-            if "reversib" in lower_line:
+            # Reversibility: - **Reversibility**: High/Medium/Low
+            elif "**reversibility**" in lower_line:
                 if "high" in lower_line:
                     current_rec.reversibility = "high"
                 elif "low" in lower_line:
