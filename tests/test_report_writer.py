@@ -4,12 +4,21 @@ import tempfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from sky_lynx.claude_client import AnalysisResult, Recommendation
 from sky_lynx.insights_parser import TrendAnalysis, WeeklyMetrics
 from sky_lynx.report_writer import format_trend, write_weekly_report
+
+
+@pytest.fixture(autouse=True)
+def mock_contract_store():
+    """Prevent tests from writing to production snow-town JSONL store."""
+    mock_store = MagicMock()
+    with patch("sky_lynx.report_writer.ContractStore", return_value=mock_store):
+        yield mock_store
 
 
 @pytest.fixture
