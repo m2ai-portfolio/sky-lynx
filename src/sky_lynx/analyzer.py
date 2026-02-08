@@ -20,6 +20,7 @@ from .insights_parser import (
     TrendAnalysis,
     load_weekly_analysis,
 )
+from .outcome_reader import build_outcome_digest, load_outcome_records
 from .pr_drafter import create_draft_pr
 from .report_writer import write_weekly_report
 
@@ -144,12 +145,25 @@ def run_analysis(dry_run: bool = False) -> tuple[TrendAnalysis, AnalysisResult]:
 
     logger.info(f"Friction details: {len(friction_details)}")
 
+    # Load outcome records from Snow-Town
+    outcome_digest = None
+    try:
+        outcome_records = load_outcome_records()
+        if outcome_records:
+            outcome_digest = build_outcome_digest(outcome_records)
+            logger.info(f"Loaded {len(outcome_records)} outcome records for analysis")
+        else:
+            logger.info("No outcome records available yet")
+    except Exception as e:
+        logger.warning(f"Could not load outcome records: {e}")
+
     # Run Claude analysis
     logger.info("Running Claude analysis..." if not dry_run else "Dry run - skipping API call")
     analysis_result = analyze_insights(
         metrics_summary=metrics_summary,
         friction_details=friction_details,
         dry_run=dry_run,
+        outcome_digest=outcome_digest,
     )
 
     logger.info(f"Got {len(analysis_result.recommendations)} recommendations")

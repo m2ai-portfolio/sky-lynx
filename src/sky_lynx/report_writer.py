@@ -3,11 +3,30 @@
 Generates markdown reports from analysis results.
 """
 
+import json
+import logging
+import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 
 from .claude_client import AnalysisResult, Recommendation
 from .insights_parser import TrendAnalysis
+
+logger = logging.getLogger(__name__)
+
+# Import snow-town contracts via path
+_snow_town_path = str(Path.home() / "projects" / "snow-town")
+if _snow_town_path not in sys.path:
+    sys.path.insert(0, _snow_town_path)
+
+from contracts.improvement_recommendation import (
+    EvidenceBasis,
+    ImprovementRecommendation,
+    RecommendationType,
+    TargetScope,
+)
+from contracts.store import ContractStore
 
 
 def get_reports_dir() -> Path:
@@ -207,6 +226,14 @@ def write_weekly_report(
     report_path = output_dir / f"{today}-sky-lynx-report.md"
     report_path.write_text("\n".join(lines))
 
+    # Write JSON sidecar with structured recommendations
+    if analysis_result.recommendations:
+        write_recommendations_sidecar(
+            analysis_result.recommendations,
+            output_dir,
+            today,
+        )
+
     return report_path
 
 
@@ -237,3 +264,99 @@ def _format_recommendation(index: int, rec: Recommendation) -> list[str]:
     lines.append("")
 
     return lines
+
+
+# Map Sky-Lynx recommendation_type strings to contract enum values
+_RECOMMENDATION_TYPE_MAP = {
+    "voice_adjustment": RecommendationType.VOICE_ADJUSTMENT,
+    "framework_addition": RecommendationType.FRAMEWORK_ADDITION,
+    "framework_refinement": RecommendationType.FRAMEWORK_REFINEMENT,
+    "validation_marker_change": RecommendationType.VALIDATION_MARKER_CHANGE,
+    "case_study_addition": RecommendationType.CASE_STUDY_ADDITION,
+    "constraint_addition": RecommendationType.CONSTRAINT_ADDITION,
+    "constraint_removal": RecommendationType.CONSTRAINT_REMOVAL,
+    "claude_md_update": RecommendationType.CLAUDE_MD_UPDATE,
+    "pipeline_change": RecommendationType.PIPELINE_CHANGE,
+}
+
+
+def _to_contract_recommendation(
+    rec: Recommendation,
+    session_id: str,
+) -> ImprovementRecommendation:
+    """Convert a Sky-Lynx Recommendation to a Snow-Town ImprovementRecommendation."""
+    rec_type = _RECOMMENDATION_TYPE_MAP.get(
+        rec.recommendation_type, RecommendationType.OTHER
+    )
+
+    scope = TargetScope.ALL_PERSONAS
+    target_ids: list[str] = []
+    if rec.target_persona:
+        scope = TargetScope.SPECIFIC_PERSONA
+        target_ids = [rec.target_persona]
+
+    return ImprovementRecommendation(
+        recommendation_id=f"sl-{uuid.uuid4().hex[:8]}",
+        session_id=session_id,
+        recommendation_type=rec_type,
+        target_system=rec.target_system,
+        title=rec.title,
+        description=rec.evidence,
+        suggested_change=rec.suggested_change,
+        scope=scope,
+        target_persona_ids=target_ids,
+        priority=rec.priority,
+        impact=rec.impact,
+        reversibility=rec.reversibility,
+        evidence=EvidenceBasis(
+            description=rec.evidence,
+            pattern_frequency=1,
+            signal_strength=0.7 if rec.priority == "high" else 0.5 if rec.priority == "medium" else 0.3,
+        ),
+    )
+
+
+def write_recommendations_sidecar(
+    recommendations: list[Recommendation],
+    output_dir: Path,
+    date_str: str,
+) -> Path | None:
+    """Write a JSON sidecar file with structured recommendations.
+
+    Also appends each recommendation to snow-town's JSONL store.
+
+    Args:
+        recommendations: List of Recommendation objects
+        output_dir: Directory to write the sidecar file
+        date_str: Date string for the filename
+
+    Returns:
+        Path to the sidecar file, or None if no recommendations
+    """
+    if not recommendations:
+        return None
+
+    session_id = f"sky-lynx-{date_str}"
+
+    # Convert to contract format
+    contract_recs = [
+        _to_contract_recommendation(rec, session_id) for rec in recommendations
+    ]
+
+    # Write JSON sidecar
+    sidecar_path = output_dir / f"{date_str}-sky-lynx-recommendations.json"
+    sidecar_data = [json.loads(rec.model_dump_json()) for rec in contract_recs]
+    sidecar_path.write_text(json.dumps(sidecar_data, indent=2))
+    logger.info(f"Wrote {len(contract_recs)} recommendations to {sidecar_path}")
+
+    # Append to snow-town JSONL store
+    try:
+        store = ContractStore()
+        for rec in contract_recs:
+            store.write_recommendation(rec)
+        store.close()
+        logger.info(f"Appended {len(contract_recs)} recommendations to snow-town store")
+    except Exception as e:
+        logger.warning(f"Failed to write to snow-town store: {e}")
+
+    return sidecar_path

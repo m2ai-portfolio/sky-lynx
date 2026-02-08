@@ -23,6 +23,9 @@ class Recommendation(BaseModel):
     suggested_change: str
     impact: str
     reversibility: str  # high, medium, low
+    target_system: str = "claude_md"  # persona | claude_md | pipeline
+    target_persona: str | None = None
+    recommendation_type: str = "other"  # voice_adjustment | framework_addition | etc.
 
 
 class AnalysisResult(BaseModel):
@@ -126,24 +129,37 @@ Output structure:
 """
 
 
-def build_analysis_prompt(metrics_summary: str, friction_details: list[str]) -> str:
+def build_analysis_prompt(
+    metrics_summary: str,
+    friction_details: list[str],
+    outcome_digest: str | None = None,
+) -> str:
     """Build the user prompt for analysis.
 
     Args:
         metrics_summary: Formatted string of weekly metrics
         friction_details: List of friction detail strings
+        outcome_digest: Optional digest of idea pipeline outcomes
 
     Returns:
         User prompt for Claude
     """
     prompt_parts = [
-        "Please analyze this week's Claude Code usage data and provide improvement recommendations for CLAUDE.md.",
+        "Please analyze this week's Claude Code usage data and provide improvement recommendations.",
         "",
         "## Weekly Metrics",
         metrics_summary,
         "",
-        "## Friction Details",
     ]
+
+    if outcome_digest:
+        prompt_parts.extend([
+            "## Idea Pipeline Outcomes",
+            outcome_digest,
+            "",
+        ])
+
+    prompt_parts.append("## Friction Details")
 
     if friction_details:
         for detail in friction_details:
@@ -158,13 +174,18 @@ def build_analysis_prompt(metrics_summary: str, friction_details: list[str]) -> 
             "",
             "1. Analyze the friction patterns and identify root causes",
             "2. Distinguish between recurring patterns and one-time anomalies",
-            "3. Generate prioritized recommendations for CLAUDE.md improvements",
+            "3. Generate prioritized recommendations",
             "4. Note what's working well that should be reinforced",
+            "",
+            "For EACH recommendation, classify it with:",
+            "- **target_system**: 'persona' (for Agent Persona Academy changes), 'claude_md' (for CLAUDE.md changes), or 'pipeline' (for process changes)",
+            "- **target_persona**: If target_system is 'persona', which persona (e.g., 'christensen', 'sky-lynx'). Omit otherwise.",
+            "- **recommendation_type**: One of: voice_adjustment, framework_addition, framework_refinement, validation_marker_change, case_study_addition, constraint_addition, constraint_removal, claude_md_update, pipeline_change, other",
             "",
             "Format your response with clear sections for:",
             "- Executive Summary (2-3 sentences)",
             "- Friction Analysis",
-            "- Recommendations (with priority: high/medium/low, evidence, suggested change, and reversibility)",
+            "- Recommendations (with priority, evidence, suggested change, reversibility, target_system, target_persona, recommendation_type)",
             "- What's Working Well",
         ]
     )
@@ -275,6 +296,26 @@ def parse_recommendations(response_text: str) -> list[Recommendation]:
                 else:
                     current_rec.reversibility = "medium"
 
+            # Target system: - **Target System**: persona/claude_md/pipeline
+            elif "**target system**" in lower_line or "**target_system**" in lower_line:
+                match = re.search(r'\*\*[Tt]arget[_ ][Ss]ystem\*\*:\s*(.+)', line)
+                if match:
+                    val = match.group(1).strip().lower()
+                    if val in ("persona", "claude_md", "pipeline"):
+                        current_rec.target_system = val
+
+            # Target persona: - **Target Persona**: christensen
+            elif "**target persona**" in lower_line or "**target_persona**" in lower_line:
+                match = re.search(r'\*\*[Tt]arget[_ ][Pp]ersona\*\*:\s*(.+)', line)
+                if match:
+                    current_rec.target_persona = match.group(1).strip()
+
+            # Recommendation type
+            elif "**recommendation type**" in lower_line or "**recommendation_type**" in lower_line:
+                match = re.search(r'\*\*[Rr]ecommendation[_ ][Tt]ype\*\*:\s*(.+)', line)
+                if match:
+                    current_rec.recommendation_type = match.group(1).strip().lower()
+
     # Don't forget the last one
     if current_rec and current_rec.title:
         recommendations.append(current_rec)
@@ -287,6 +328,7 @@ def analyze_insights(
     friction_details: list[str],
     dry_run: bool = False,
     api_key: str | None = None,
+    outcome_digest: str | None = None,
 ) -> AnalysisResult:
     """Run Claude analysis on the insights data.
 
@@ -295,6 +337,7 @@ def analyze_insights(
         friction_details: List of friction details
         dry_run: If True, skip API call and return mock result
         api_key: Optional API key override
+        outcome_digest: Optional digest of idea pipeline outcomes
 
     Returns:
         AnalysisResult with recommendations
@@ -327,7 +370,7 @@ def analyze_insights(
 
     client = Anthropic(api_key=key)
     system_prompt = load_persona_prompt()
-    user_prompt = build_analysis_prompt(metrics_summary, friction_details)
+    user_prompt = build_analysis_prompt(metrics_summary, friction_details, outcome_digest)
 
     response = client.messages.create(
         model=DEFAULT_MODEL,
