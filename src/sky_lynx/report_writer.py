@@ -349,13 +349,20 @@ def write_recommendations_sidecar(
     sidecar_path.write_text(json.dumps(sidecar_data, indent=2))
     logger.info(f"Wrote {len(contract_recs)} recommendations to {sidecar_path}")
 
-    # Append to snow-town JSONL store
+    # Append to snow-town JSONL store (with session_id dedup)
     try:
         store = ContractStore()
-        for rec in contract_recs:
-            store.write_recommendation(rec)
+        existing = store.query_recommendations(limit=10000)
+        existing_sessions = {r.session_id for r in existing if r.session_id}
+        if session_id in existing_sessions:
+            logger.info(
+                f"Session '{session_id}' already has recommendations in store, skipping to avoid duplicates"
+            )
+        else:
+            for rec in contract_recs:
+                store.write_recommendation(rec)
+            logger.info(f"Appended {len(contract_recs)} recommendations to snow-town store")
         store.close()
-        logger.info(f"Appended {len(contract_recs)} recommendations to snow-town store")
     except Exception as e:
         logger.warning(f"Failed to write to snow-town store: {e}")
 
